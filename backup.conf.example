@@ -77,3 +77,10 @@ STAGING_DIR="/tmp/backup-staging"
 
 # Log file (leave blank to log to stdout/journal only)
 LOG_FILE="/var/log/linux-backup.log"
+
+# MQTT — publish backup state events (leave MQTT_BROKER blank to disable)
+MQTT_BROKER="localhost"
+MQTT_PORT="1883"
+MQTT_USERNAME=""
+MQTT_PASSWORD=""
+MQTT_TOPIC_PREFIX="backups"   # events published to $MQTT_TOPIC_PREFIX/$HOSTNAME

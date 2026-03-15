@@ -17,6 +17,8 @@ HOSTNAME="$(hostname -s)"
 TIMESTAMP="$(date -u '+%Y-%m-%d_%H%M%S')"
 ARCHIVE_NAME="${HOSTNAME}_${TIMESTAMP}.tar.gz"
 STAGING_FILE="${STAGING_DIR}/${ARCHIVE_NAME}"
+START_TIME="$(date +%s)"
+CURRENT_STAGE="init"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -30,7 +32,35 @@ log() {
 
 die() {
     log "ERROR: $*"
+    mqtt_publish "failed" "\"stage\":\"${CURRENT_STAGE}\",\"error\":\"$*\""
     exit 1
+}
+
+# ── MQTT ──────────────────────────────────────────────────────────────────────
+
+mqtt_publish() {
+    local state="$1"
+    local extra="${2:-}"
+    [[ -n "${MQTT_BROKER:-}" ]] || return 0
+
+    local topic="${MQTT_TOPIC_PREFIX}/${HOSTNAME}"
+    local ts
+    ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    local payload="{\"state\":\"${state}\",\"host\":\"${HOSTNAME}\",\"timestamp\":\"${ts}\""
+    [[ -n "$extra" ]] && payload="${payload},${extra}"
+    payload="${payload}}"
+
+    local auth_args=()
+    [[ -n "${MQTT_USERNAME:-}" ]] && auth_args+=(-u "$MQTT_USERNAME")
+    [[ -n "${MQTT_PASSWORD:-}" ]] && auth_args+=(-P "$MQTT_PASSWORD")
+
+    mosquitto_pub \
+        -h "$MQTT_BROKER" \
+        -p "${MQTT_PORT:-1883}" \
+        "${auth_args[@]}" \
+        -t "$topic" \
+        -m "$payload" \
+    || log "WARNING: failed to publish MQTT event (state=$state)"
 }
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
@@ -48,12 +78,14 @@ if [[ -n "${MARIADB_DATABASES:-}" ]]; then
 fi
 
 mkdir -p "$STAGING_DIR"
+mqtt_publish "started"
 
 # ── Dump MariaDB databases ────────────────────────────────────────────────────
 
 DB_DUMP_DIR="${STAGING_DIR}/mariadb-dumps"
 
 if [[ -n "${MARIADB_DATABASES:-}" ]]; then
+    CURRENT_STAGE="mariadb_dump"
     mkdir -p "$DB_DUMP_DIR"
     for db in $MARIADB_DATABASES; do
         DUMP_FILE="${DB_DUMP_DIR}/${db}.sql.gz"
@@ -96,6 +128,7 @@ fi
 
 # ── Create archive ────────────────────────────────────────────────────────────
 
+CURRENT_STAGE="archive"
 log "Creating archive: $STAGING_FILE"
 tar czf "$STAGING_FILE" \
     "${EXCLUDE_ARGS[@]}" \
@@ -127,6 +160,7 @@ fi
 S3_KEY="${S3_PREFIX}/${HOSTNAME}/${ARCHIVE_NAME}"
 S3_URI="s3://${S3_BUCKET}/${S3_KEY}"
 
+CURRENT_STAGE="upload"
 log "Uploading to $S3_URI"
 aws s3 cp "$UPLOAD_FILE" "$S3_URI" \
     ${AWS_REGION:+--region "$AWS_REGION"} \
@@ -139,6 +173,7 @@ log "Upload complete, local staging files removed"
 
 # ── Prune old backups ─────────────────────────────────────────────────────────
 
+CURRENT_STAGE="prune"
 log "Checking retention (keep newest $RETENTION_COUNT)"
 S3_PREFIX_PATH="${S3_PREFIX}/${HOSTNAME}/"
 
@@ -167,4 +202,7 @@ if (( COUNT > RETENTION_COUNT )); then
     done
 fi
 
+DURATION=$(( $(date +%s) - START_TIME ))
+mqtt_publish "completed" \
+    "\"duration_seconds\":${DURATION},\"archive_size\":\"${ARCHIVE_SIZE}\",\"s3_uri\":\"${S3_URI}\",\"backups_retained\":${COUNT}"
 log "Backup complete: $S3_URI"
