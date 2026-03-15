@@ -1,0 +1,79 @@
+# backup.conf — configuration for linux-backup (garibaldi)
+
+# S3 bucket and prefix
+S3_BUCKET="your-bucket-name"
+S3_PREFIX="linux-backup"   # backups land at s3://S3_BUCKET/S3_PREFIX/HOSTNAME/
+
+# AWS region (leave blank to use instance role or ~/.aws/config)
+AWS_REGION="eu-west-2"
+
+# MariaDB databases to dump (space-separated).
+# Dumped to STAGING_DIR before archiving. Requires root (uses unix socket auth).
+# Set to empty string to skip: MARIADB_DATABASES=""
+MARIADB_DATABASES="asterisk asteriskcdrdb"
+
+# Paths to include in the backup archive
+BACKUP_PATHS=(
+    # --- Asterisk / FreePBX ---
+    /etc/asterisk
+    /var/lib/asterisk       # excludes sounds/ below — 80MB vs 800MB
+    /var/spool/asterisk     # excludes monitor/ (recordings) below
+
+    # --- Custom daemons (your code) ---
+    /etc/asterisk-mqtt
+    /etc/ups-mqtt
+    /usr/local/bin/asterisk-mqtt    # compiled Go binary
+    /usr/local/bin/pnp_server       # Python script
+    /home/sweeney/ups-mqtt          # versioned ups-mqtt binaries
+    /home/sweeney/tempest-mqtt      # tempest-mqtt daemon + service file
+
+    # --- MQTT broker ---
+    /etc/mosquitto          # includes certs/ and conf.d/
+
+    # --- Network / proxy ---
+    /etc/haproxy
+    /etc/apache2
+
+    # --- UPS monitoring ---
+    /etc/nut
+
+    # --- Firewall ---
+    /etc/iptables           # may not exist, backup.sh skips missing paths
+
+    # --- Mail ---
+    /etc/postfix
+
+    # --- Phone provisioning (config files only, not firmware) ---
+    /tftpboot/phonebook.xml
+    /tftpboot/legacy_sip.cfg
+    /etc/default/tftpd-hpa
+
+    # --- Systemd custom units ---
+    /etc/systemd/system
+
+    # --- Cron ---
+    /etc/cron.d
+    /var/spool/incron       # incron rules
+)
+
+# Paths to exclude from the archive (tar --exclude patterns)
+EXCLUDE_PATHS=(
+    "*.log"
+    "*.tmp"
+    /var/lib/asterisk/sounds        # 724MB of re-downloadable sound files
+    /var/spool/asterisk/monitor     # call recordings; remove this line to include them
+    /home/sweeney/ups-mqtt/testdata
+)
+
+# How many backups to keep in S3 (oldest deleted when limit exceeded)
+RETENTION_COUNT=30
+
+# Encrypt backup with GPG before uploading?
+# Set to GPG key ID/email, or leave blank to skip.
+GPG_RECIPIENT=""
+
+# Local staging directory (needs ~500MB free for MariaDB dumps + archive)
+STAGING_DIR="/tmp/backup-staging"
+
+# Log file (leave blank to log to stdout/journal only)
+LOG_FILE="/var/log/linux-backup.log"
