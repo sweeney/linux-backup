@@ -124,6 +124,45 @@ sudo bash /opt/linux-backup/restore.sh latest --host old-hostname
 The restore script also re-imports MariaDB dumps if present in the archive.
 After restoring run `systemctl daemon-reload` and restart affected services.
 
+## MQTT events
+
+If `MQTT_BROKER` is set in `backup.conf`, the script publishes events to
+`backups/<hostname>` at the start and end of each backup run.
+
+**started**
+```json
+{"state":"started","host":"garibaldi","timestamp":"2026-03-15T11:52:51Z"}
+```
+
+**completed**
+```json
+{
+  "state": "completed",
+  "host": "garibaldi",
+  "timestamp": "2026-03-15T11:53:15Z",
+  "duration_seconds": 24,
+  "archive_size": "155M",
+  "s3_uri": "s3://bucket/linux-backup/garibaldi/garibaldi_2026-03-15_115251.tar.gz",
+  "backups_retained": 4
+}
+```
+
+**failed**
+```json
+{"state":"failed","host":"garibaldi","timestamp":"...","stage":"upload","error":"S3 upload failed"}
+```
+
+Stages: `mariadb_dump`, `archive`, `upload`, `prune`.
+
+## Deploying updates
+
+After changing scripts locally, push them to the target machine:
+
+```bash
+./deploy.sh                    # uses default host (100.122.159.5)
+./deploy.sh user@192.168.1.10  # or specify a host
+```
+
 ## Backup schedule and retention
 
 Default: daily at a randomised time around midnight, keeping 30 backups (~1 month).

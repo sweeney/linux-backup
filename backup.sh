@@ -133,8 +133,10 @@ log "Creating archive: $STAGING_FILE"
 tar czf "$STAGING_FILE" \
     "${EXCLUDE_ARGS[@]}" \
     --ignore-failed-read \
-    "${EXISTING_PATHS[@]}" \
-|| die "tar failed (exit $?)"
+    "${EXISTING_PATHS[@]}"
+TAR_EXIT=$?
+# exit 1 = warnings only (e.g. files changed while reading); exit 2 = fatal
+(( TAR_EXIT <= 1 )) || die "tar failed (exit $TAR_EXIT)"
 
 ARCHIVE_SIZE="$(du -sh "$STAGING_FILE" | cut -f1)"
 log "Archive size: $ARCHIVE_SIZE"
@@ -203,6 +205,7 @@ if (( COUNT > RETENTION_COUNT )); then
 fi
 
 DURATION=$(( $(date +%s) - START_TIME ))
+RETAINED=$(( COUNT > RETENTION_COUNT ? RETENTION_COUNT : COUNT ))
 mqtt_publish "completed" \
-    "\"duration_seconds\":${DURATION},\"archive_size\":\"${ARCHIVE_SIZE}\",\"s3_uri\":\"${S3_URI}\",\"backups_retained\":${COUNT}"
+    "\"duration_seconds\":${DURATION},\"archive_size\":\"${ARCHIVE_SIZE}\",\"s3_uri\":\"${S3_URI}\",\"backups_retained\":${RETAINED}"
 log "Backup complete: $S3_URI"
