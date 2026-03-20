@@ -163,6 +163,8 @@ echo "Restore complete."
 if [[ "$DEST_ROOT" == "/" ]]; then
     echo "You may need to:"
     echo "  systemctl daemon-reload"
-    echo "  systemctl restart mosquitto asterisk asterisk-mqtt ups-mqtt"
+    echo "  udevadm control --reload-rules && udevadm trigger  # re-apply udev rules (e.g. /dev/zigbee symlink)"
+    echo "  systemctl restart mosquitto asterisk asterisk-mqtt ups-mqtt identity cloudflared"
+    echo "  cd /home/sweeney/zigbee2mqtt && docker compose up -d  # restart zigbee2mqtt"
     echo "  fwconsole reload    # if FreePBX config was restored"
 fi
