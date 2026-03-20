@@ -28,11 +28,12 @@ BACKUP_PATHS=(
     /home/sweeney/tempest-mqtt      # tempest-mqtt daemon + service file
 
     # --- Identity service ---
-    /etc/identity                   # identity daemon config
-    /usr/local/bin/identity         # identity daemon binary
+    /etc/identity                   # identity daemon config + env file
+    /opt/identity/bin/identity-server  # identity daemon binary
+    /var/lib/identity               # identity daemon state
 
     # --- Cloudflare tunnel ---
-    /etc/cloudflared                # tunnel credentials + config.yml
+    # token is embedded in the systemd unit; /etc/systemd/system covers it
 
     # --- Zigbee2MQTT (Docker) ---
     /home/sweeney/zigbee2mqtt       # docker-compose.yaml + data/ (config, network keys, devices)
