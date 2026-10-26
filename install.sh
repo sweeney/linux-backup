@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # install.sh — set up linux-backup on a Debian host
 #
-# Run as root on the target machine:
-#   curl -fsSL https://... | bash    (or just: sudo bash install.sh)
+# Run as root on the target machine, from a copy of this repo:
+#   sudo bash install.sh
+#
+# Installs the scripts to /opt/linux-backup and a systemd timer. If a
+# backup.conf sits next to this script it is installed; otherwise
+# backup.conf.example is, for you to edit. An existing config is never
+# overwritten.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,8 +38,13 @@ cp "$SCRIPT_DIR/backup.sh"  "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/restore.sh" "$INSTALL_DIR/"
 
 if [[ ! -f "$INSTALL_DIR/backup.conf" ]]; then
-    cp "$SCRIPT_DIR/backup.conf" "$INSTALL_DIR/"
-    echo "  Copied default backup.conf — edit $INSTALL_DIR/backup.conf before first run"
+    if [[ -f "$SCRIPT_DIR/backup.conf" ]]; then
+        cp "$SCRIPT_DIR/backup.conf" "$INSTALL_DIR/backup.conf"
+        echo "  Installed backup.conf"
+    else
+        cp "$SCRIPT_DIR/backup.conf.example" "$INSTALL_DIR/backup.conf"
+        echo "  Installed backup.conf.example as backup.conf — edit it before first run"
+    fi
 else
     echo "  backup.conf already exists, not overwriting"
 fi
@@ -80,7 +90,7 @@ echo "=== Installation complete ==="
 echo
 echo "Next steps:"
 echo "  1. Edit $INSTALL_DIR/backup.conf"
-echo "     — set S3_BUCKET, AWS_REGION, and review BACKUP_PATHS"
+echo "     — set S3_BUCKET, AWS_REGION, and review BACKUP_PATHS and PRE_BACKUP_HOOKS_DIR"
 echo "  2. Configure AWS credentials (one of):"
 echo "     a) IAM instance role (recommended if on EC2)"
 echo "     b) aws configure  (writes to /root/.aws/credentials)"

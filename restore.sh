@@ -6,22 +6,17 @@
 #   restore.sh latest             — restore the most recent backup
 #   restore.sh <backup-filename>  — restore a specific backup by name
 #   restore.sh --dest /target     — restore to a specific root (default: /)
+#   restore.sh --host old-name    — restore another host's backups
+#   restore.sh --config FILE      — use FILE instead of backup.conf
+#   restore.sh --yes              — don't ask before overwriting
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${CONFIG:-$SCRIPT_DIR/backup.conf}"
-
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "ERROR: config file not found: $CONFIG_FILE" >&2
-    exit 1
-fi
-
-# shellcheck source=backup.conf
-source "$CONFIG_FILE"
-
 HOSTNAME_TARGET="$(hostname -s)"
 DEST_ROOT="/"
 SELECTED=""
+ASSUME_YES=0
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 
@@ -40,6 +35,10 @@ while [[ $# -gt 0 ]]; do
             CONFIG_FILE="$2"
             shift 2
             ;;
+        --yes|-y)
+            ASSUME_YES=1
+            shift
+            ;;
         -*)
             echo "Unknown option: $1" >&2
             exit 1
@@ -50,6 +49,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Sourced after parsing so --config takes effect
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "ERROR: config file not found: $CONFIG_FILE" >&2
+    exit 1
+fi
+
+# shellcheck source=backup.conf.example
+source "$CONFIG_FILE"
 
 S3_PREFIX_PATH="${S3_PREFIX}/${HOSTNAME_TARGET}/"
 
@@ -97,7 +105,8 @@ fi
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
 
-[[ $EUID -eq 0 ]] || { echo "ERROR: must run as root" >&2; exit 1; }
+# id -u rather than $EUID so tests can stand in for root with a stub id
+[[ "$(id -u)" -eq 0 ]] || { echo "ERROR: must run as root" >&2; exit 1; }
 command -v aws &>/dev/null || { echo "ERROR: aws CLI not found" >&2; exit 1; }
 
 S3_URI="s3://${S3_BUCKET}/${SELECTED}"
@@ -108,8 +117,11 @@ STAGING_FILE="${STAGING_DIR}/${FILENAME}"
 echo "Restore source : $S3_URI"
 echo "Restore target : $DEST_ROOT"
 echo
-read -r -p "Proceed? Files will be overwritten. [y/N] " CONFIRM
-[[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+if (( ! ASSUME_YES )); then
+    CONFIRM=""
+    read -r -p "Proceed? Files will be overwritten. [y/N] " CONFIRM || true
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+fi
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
@@ -142,17 +154,22 @@ rm -f "$EXTRACT_FILE"
 
 # ── Restore MariaDB dumps (only when restoring to /) ─────────────────────────
 
-DB_DUMP_DIR="${DEST_ROOT%/}/tmp/backup-staging/mariadb-dumps"
+# Dumps and hook output are archived under STAGING_DIR, so they extract there
+DB_DUMP_DIR="${DEST_ROOT%/}${STAGING_DIR}/mariadb-dumps"
+HOOKS_OUTPUT_DIR="${DEST_ROOT%/}${STAGING_DIR}/hooks"
 
 if [[ "$DEST_ROOT" == "/" && -d "$DB_DUMP_DIR" ]]; then
     echo
     echo "Found MariaDB dumps in $DB_DUMP_DIR"
+    # mariadb is the name on newer MariaDB; mysql is the older alias
+    MYSQL="$(command -v mariadb || command -v mysql || true)"
+    [[ -n "$MYSQL" ]] || { echo "ERROR: mariadb/mysql client not found; dumps left in $DB_DUMP_DIR" >&2; exit 1; }
     for dump in "$DB_DUMP_DIR"/*.sql.gz; do
         [[ -f "$dump" ]] || continue
         db="$(basename "$dump" .sql.gz)"
         echo "Restoring database: $db"
-        mysql -e "CREATE DATABASE IF NOT EXISTS \`${db}\`;" \
-        && zcat "$dump" | mysql "$db" \
+        "$MYSQL" -e "CREATE DATABASE IF NOT EXISTS \`${db}\`;" \
+        && zcat "$dump" | "$MYSQL" "$db" \
         || echo "WARNING: failed to restore $db — you may need to do it manually"
     done
     rm -rf "$DB_DUMP_DIR"
@@ -160,11 +177,15 @@ fi
 
 echo
 echo "Restore complete."
+if [[ -d "$HOOKS_OUTPUT_DIR" ]]; then
+    echo
+    echo "Pre-backup hook output restored to $HOOKS_OUTPUT_DIR"
+    echo "(one directory per hook). Load those dumps by hand or with your host's runbook."
+fi
 if [[ "$DEST_ROOT" == "/" ]]; then
+    echo
     echo "You may need to:"
     echo "  systemctl daemon-reload"
-    echo "  udevadm control --reload-rules && udevadm trigger  # re-apply udev rules (e.g. /dev/zigbee symlink)"
-    echo "  systemctl restart mosquitto asterisk asterisk-mqtt ups-mqtt identity cloudflared"
-    echo "  cd /home/sweeney/zigbee2mqtt && docker compose up -d  # restart zigbee2mqtt"
-    echo "  fwconsole reload    # if FreePBX config was restored"
+    echo "  udevadm control --reload-rules && udevadm trigger  # if udev rules were restored"
+    echo "  systemctl restart <services whose config was restored>"
 fi

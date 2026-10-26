@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup.sh — archive configured paths and upload to S3
 set -euo pipefail
+umask 077   # staging dumps and archives may hold secrets
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${1:-$SCRIPT_DIR/backup.conf}"
@@ -10,7 +11,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
 fi
 
-# shellcheck source=backup.conf
+# shellcheck source=backup.conf.example
 source "$CONFIG_FILE"
 
 HOSTNAME="$(hostname -s)"
@@ -23,7 +24,8 @@ CURRENT_STAGE="init"
 # ── Logging ──────────────────────────────────────────────────────────────────
 
 log() {
-    local msg="[$(date -u '+%Y-%m-%d %H:%M:%S')] $*"
+    local msg
+    msg="[$(date -u '+%Y-%m-%d %H:%M:%S')] $*"
     echo "$msg"
     if [[ -n "${LOG_FILE:-}" ]]; then
         echo "$msg" >> "$LOG_FILE"
@@ -65,24 +67,35 @@ mqtt_publish() {
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
 
-[[ $EUID -eq 0 ]] || die "must run as root"
+# id -u rather than $EUID so tests can stand in for root with a stub id
+[[ "$(id -u)" -eq 0 ]] || die "must run as root"
 command -v aws  &>/dev/null || die "aws CLI not found — run install.sh first"
 command -v tar  &>/dev/null || die "tar not found"
 
 if [[ -n "${GPG_RECIPIENT:-}" ]]; then
     command -v gpg &>/dev/null || die "gpg not found but GPG_RECIPIENT is set"
+    # Fail before the dumps, not after: the key must be in root's keyring
+    gpg --batch --list-keys "$GPG_RECIPIENT" &>/dev/null \
+        || die "GPG key not found in keyring: $GPG_RECIPIENT"
 fi
 
+# mariadb-dump is the name on newer MariaDB; mysqldump is the older alias
+MYSQLDUMP=""
 if [[ -n "${MARIADB_DATABASES:-}" ]]; then
-    command -v mysqldump &>/dev/null || die "mysqldump not found but MARIADB_DATABASES is set"
+    MYSQLDUMP="$(command -v mariadb-dump || command -v mysqldump || true)"
+    [[ -n "$MYSQLDUMP" ]] || die "mariadb-dump/mysqldump not found but MARIADB_DATABASES is set"
 fi
 
 mkdir -p "$STAGING_DIR"
+
+DB_DUMP_DIR="${STAGING_DIR}/mariadb-dumps"
+HOOKS_OUTPUT_DIR="${STAGING_DIR}/hooks"
+# Leftovers from a run that died must not end up in this archive
+rm -rf "$DB_DUMP_DIR" "$HOOKS_OUTPUT_DIR"
+
 mqtt_publish "started"
 
 # ── Dump MariaDB databases ────────────────────────────────────────────────────
-
-DB_DUMP_DIR="${STAGING_DIR}/mariadb-dumps"
 
 if [[ -n "${MARIADB_DATABASES:-}" ]]; then
     CURRENT_STAGE="mariadb_dump"
@@ -90,7 +103,7 @@ if [[ -n "${MARIADB_DATABASES:-}" ]]; then
     for db in $MARIADB_DATABASES; do
         DUMP_FILE="${DB_DUMP_DIR}/${db}.sql.gz"
         log "Dumping database: $db -> $DUMP_FILE"
-        mysqldump \
+        "$MYSQLDUMP" \
             --single-transaction \
             --routines \
             --triggers \
@@ -99,6 +112,63 @@ if [[ -n "${MARIADB_DATABASES:-}" ]]; then
         | gzip > "$DUMP_FILE" \
         || die "mysqldump failed for database: $db"
     done
+fi
+
+# ── Run pre-backup hooks ──────────────────────────────────────────────────────
+#
+# Each executable in PRE_BACKUP_HOOKS_DIR runs in name order with an empty
+# directory in $BACKUP_HOOK_OUTPUT_DIR, which goes into the archive. A hook that
+# fails or times out does not stop the backup: everything else is still worth
+# uploading. But the run then ends with a "failed" event (stage hook:<name>)
+# instead of "completed", and exits non-zero so the systemd unit shows failed.
+
+HOOKS_FAILED=()
+
+run_hook() {
+    local hook="$1" name out rc=0
+    name="$(basename "$hook")"
+    out="${HOOKS_OUTPUT_DIR}/${name}"
+    mkdir -p "$out"
+
+    local cmd=("$hook")
+    [[ -n "$TIMEOUT_CMD" ]] && cmd=("$TIMEOUT_CMD" "$HOOK_TIMEOUT" "$hook")
+
+    log "Running hook: $name"
+    BACKUP_HOOK_OUTPUT_DIR="$out" \
+    BACKUP_HOSTNAME="$HOSTNAME" \
+    BACKUP_TIMESTAMP="$TIMESTAMP" \
+        "${cmd[@]}" </dev/null 2>&1 \
+    | while IFS= read -r line || [[ -n "$line" ]]; do log "  [$name] $line"; done \
+    || rc=$?
+
+    if (( rc == 124 )) && [[ -n "$TIMEOUT_CMD" ]]; then
+        log "ERROR: hook timed out after ${HOOK_TIMEOUT}s: $name"
+        HOOKS_FAILED+=("$name")
+    elif (( rc != 0 )); then
+        log "ERROR: hook failed (exit $rc): $name"
+        HOOKS_FAILED+=("$name")
+    fi
+}
+
+if [[ -n "${PRE_BACKUP_HOOKS_DIR:-}" ]]; then
+    CURRENT_STAGE="hooks"
+    HOOK_TIMEOUT="${HOOK_TIMEOUT:-600}"
+    TIMEOUT_CMD="$(command -v timeout || true)"
+    [[ -n "$TIMEOUT_CMD" ]] || log "WARNING: timeout not found; hooks run without a time limit"
+
+    if [[ ! -d "$PRE_BACKUP_HOOKS_DIR" ]]; then
+        log "ERROR: PRE_BACKUP_HOOKS_DIR not found: $PRE_BACKUP_HOOKS_DIR"
+        HOOKS_FAILED+=("PRE_BACKUP_HOOKS_DIR")
+    else
+        for hook in "$PRE_BACKUP_HOOKS_DIR"/*; do
+            [[ -f "$hook" ]] || continue
+            if [[ ! -x "$hook" ]]; then
+                log "WARNING: hook not executable, skipping: $hook"
+                continue
+            fi
+            run_hook "$hook"
+        done
+    fi
 fi
 
 # ── Build exclude args ─────────────────────────────────────────────────────────
@@ -121,20 +191,21 @@ done
 
 [[ ${#EXISTING_PATHS[@]} -gt 0 ]] || die "no backup paths exist — nothing to do"
 
-# Include DB dumps in archive if they were produced
-if [[ -d "$DB_DUMP_DIR" ]]; then
-    EXISTING_PATHS+=("$DB_DUMP_DIR")
-fi
+# Include DB dumps and hook output in archive if they were produced
+for d in "$DB_DUMP_DIR" "$HOOKS_OUTPUT_DIR"; do
+    if [[ -d "$d" ]]; then EXISTING_PATHS+=("$d"); fi
+done
 
 # ── Create archive ────────────────────────────────────────────────────────────
 
 CURRENT_STAGE="archive"
 log "Creating archive: $STAGING_FILE"
+TAR_EXIT=0
 tar czf "$STAGING_FILE" \
     "${EXCLUDE_ARGS[@]}" \
     --ignore-failed-read \
-    "${EXISTING_PATHS[@]}"
-TAR_EXIT=$?
+    "${EXISTING_PATHS[@]}" \
+|| TAR_EXIT=$?
 # exit 1 = warnings only (e.g. files changed while reading); exit 2 = fatal
 (( TAR_EXIT <= 1 )) || die "tar failed (exit $TAR_EXIT)"
 
@@ -170,7 +241,7 @@ aws s3 cp "$UPLOAD_FILE" "$S3_URI" \
 || die "S3 upload failed"
 
 rm -f "$UPLOAD_FILE"
-rm -rf "$DB_DUMP_DIR"
+rm -rf "$DB_DUMP_DIR" "$HOOKS_OUTPUT_DIR"
 log "Upload complete, local staging files removed"
 
 # ── Prune old backups ─────────────────────────────────────────────────────────
@@ -206,6 +277,18 @@ fi
 
 DURATION=$(( $(date +%s) - START_TIME ))
 RETAINED=$(( COUNT > RETENTION_COUNT ? RETENTION_COUNT : COUNT ))
-mqtt_publish "completed" \
-    "\"duration_seconds\":${DURATION},\"archive_size\":\"${ARCHIVE_SIZE}\",\"s3_uri\":\"${S3_URI}\",\"backups_retained\":${RETAINED}"
+RESULT="\"duration_seconds\":${DURATION},\"archive_size\":\"${ARCHIVE_SIZE}\",\"s3_uri\":\"${S3_URI}\",\"backups_retained\":${RETAINED}"
+
+if (( ${#HOOKS_FAILED[@]} > 0 )); then
+    HOOKS_FAILED_JSON=""
+    for name in "${HOOKS_FAILED[@]}"; do
+        HOOKS_FAILED_JSON+="${HOOKS_FAILED_JSON:+,}\"${name}\""
+    done
+    log "ERROR: uploaded $S3_URI, but ${#HOOKS_FAILED[@]} hook(s) failed: ${HOOKS_FAILED[*]}"
+    mqtt_publish "failed" \
+        "\"stage\":\"hook:${HOOKS_FAILED[0]}\",\"error\":\"${#HOOKS_FAILED[@]} hook(s) failed\",\"hooks_failed\":[${HOOKS_FAILED_JSON}],${RESULT}"
+    exit 1
+fi
+
+mqtt_publish "completed" "$RESULT"
 log "Backup complete: $S3_URI"

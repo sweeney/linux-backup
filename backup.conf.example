@@ -1,4 +1,7 @@
-# backup.conf — configuration for linux-backup (garibaldi)
+# backup.conf — configuration for linux-backup
+#
+# Copy to backup.conf (or keep it in your host's own repo) and edit. It is
+# sourced by bash, so arrays and comments work as usual.
 
 # S3 bucket and prefix
 S3_BUCKET="your-bucket-name"
@@ -7,95 +10,62 @@ S3_PREFIX="linux-backup"   # backups land at s3://S3_BUCKET/S3_PREFIX/HOSTNAME/
 # AWS region (leave blank to use instance role or ~/.aws/config)
 AWS_REGION="eu-west-2"
 
-# MariaDB databases to dump (space-separated).
+# MariaDB databases to dump (space-separated), with mariadb-dump or mysqldump.
 # Dumped to STAGING_DIR before archiving. Requires root (uses unix socket auth).
 # Set to empty string to skip: MARIADB_DATABASES=""
-MARIADB_DATABASES="asterisk asteriskcdrdb"
+MARIADB_DATABASES=""
 
-# Paths to include in the backup archive
+# Pre-backup hooks: a directory of executables that run as root, in filename
+# order, before the archive is made. Use them for anything that must be dumped
+# rather than copied live (SQLite, InfluxDB, ...). Each hook gets an empty
+# directory in $BACKUP_HOOK_OUTPUT_DIR; it is archived at
+# STAGING_DIR/hooks/<hook-name>/. The directory and hooks must be owned by root
+# and writable only by root. Leave blank to skip.
+PRE_BACKUP_HOOKS_DIR=""
+
+# Seconds a hook may run before it is killed and counted as failed
+HOOK_TIMEOUT=600
+
+# Paths to include in the backup archive (missing paths are skipped with a warning)
 BACKUP_PATHS=(
-    # --- Asterisk / FreePBX ---
-    /etc/asterisk
-    /var/lib/asterisk       # excludes sounds/ below — 80MB vs 800MB
-    /var/spool/asterisk     # excludes monitor/ (recordings) below
-
-    # --- Custom daemons (your code) ---
-    /etc/asterisk-mqtt
-    /etc/ups-mqtt
-    /usr/local/bin/asterisk-mqtt    # compiled Go binary
-    /usr/local/bin/pnp_server       # Python script
-    /home/sweeney/ups-mqtt          # versioned ups-mqtt binaries
-    /home/sweeney/tempest-mqtt      # tempest-mqtt daemon + service file
-
-    # --- Identity service ---
-    /etc/identity                   # identity daemon config + env file
-    /opt/identity/bin/identity-server  # identity daemon binary
-    /var/lib/identity               # identity daemon state
-
-    # --- Cloudflare tunnel ---
-    # token is embedded in the systemd unit; /etc/systemd/system covers it
-
-    # --- Zigbee2MQTT (Docker) ---
-    /home/sweeney/zigbee2mqtt       # docker-compose.yaml + data/ (config, network keys, devices)
-
-    # --- USB device symlinks ---
-    /etc/udev/rules.d               # includes custom zigbee stable-symlink rule (e.g. /dev/zigbee)
-
-    # --- MQTT broker ---
-    /etc/mosquitto          # includes certs/ and conf.d/
-
-    # --- Network / proxy ---
-    /etc/haproxy
-    /etc/apache2
-
-    # --- UPS monitoring ---
-    /etc/nut
-
-    # --- Firewall ---
-    /etc/iptables           # may not exist, backup.sh skips missing paths
-
-    # --- Mail ---
-    /etc/postfix
-
-    # --- Phone provisioning (config files only, not firmware) ---
-    /tftpboot/phonebook.xml
-    /tftpboot/legacy_sip.cfg
-    /etc/default/tftpd-hpa
-
-    # --- Systemd custom units ---
-    /etc/systemd/system
-
-    # --- Cron ---
+    /etc/systemd/system     # custom unit files and drop-ins
     /etc/cron.d
-    /var/spool/incron       # incron rules
+    /etc/default
+    /etc/sudoers.d
+    /etc/udev/rules.d
+    /usr/local/bin          # locally built or installed binaries
+    /usr/local/sbin
+
+    # Add your services' config and state, e.g.:
+    # /etc/myservice
+    # /var/lib/myservice
+    # /opt/myservice/bin/myservice
 )
 
 # Paths to exclude from the archive (tar --exclude patterns)
 EXCLUDE_PATHS=(
     "*.log"
     "*.tmp"
-    /var/lib/asterisk/sounds        # 724MB of re-downloadable sound files
-    /var/spool/asterisk/monitor     # call recordings; remove this line to include them
-    /home/sweeney/ups-mqtt/testdata
-    /home/sweeney/zigbee2mqtt/data/log.log          # current log; regenerated at runtime
-    /home/sweeney/zigbee2mqtt/data/migration-*.log  # one-time migration notes
 )
 
 # How many backups to keep in S3 (oldest deleted when limit exceeded)
 RETENTION_COUNT=30
 
 # Encrypt backup with GPG before uploading?
-# Set to GPG key ID/email, or leave blank to skip.
+# Set to GPG key ID/email, or leave blank to skip. The public key must be in
+# root's keyring on the host; keep the private key off it, somewhere safe.
 GPG_RECIPIENT=""
 
-# Local staging directory (needs ~500MB free for MariaDB dumps + archive)
+# Local staging directory (needs room for the dumps plus the archive).
+# Dumps and hook output are archived under this path, so keep it the same
+# between backup and restore.
 STAGING_DIR="/tmp/backup-staging"
 
 # Log file (leave blank to log to stdout/journal only)
 LOG_FILE="/var/log/linux-backup.log"
 
 # MQTT — publish backup state events (leave MQTT_BROKER blank to disable)
-MQTT_BROKER="localhost"
+MQTT_BROKER=""
 MQTT_PORT="1883"
 MQTT_USERNAME=""
 MQTT_PASSWORD=""
