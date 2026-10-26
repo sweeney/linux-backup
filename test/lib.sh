@@ -140,9 +140,11 @@ EOF
 
 # gnu_tar: print the path of a GNU tar, or nothing.
 gnu_tar() {
-    local t
+    local t v
     for t in gtar tar; do
-        if command -v "$t" >/dev/null && "$t" --version 2>/dev/null | grep -q 'GNU tar'; then
+        # read, then match: grep -q in a pipe can SIGPIPE the writer under pipefail
+        v=$("$t" --version 2>/dev/null) || continue
+        if [[ "$v" == *"GNU tar"* ]]; then
             command -v "$t"
             return
         fi

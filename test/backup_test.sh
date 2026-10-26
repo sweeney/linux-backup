@@ -57,13 +57,11 @@ hook() {
     chmod +x "$WORK/hooks/$1"
 }
 
-# run: backup.sh as a separate process on the stubs. Sets $rc and $output.
-# Pass a tar stub dir, or "realtar" to use the system's GNU tar.
+# run: backup.sh as a separate process on the stubs, including the stub tar.
+# Sets $rc and $output.
 run() {
-    local tardir=$TARSTUB
-    [[ "${1:-}" == realtar ]] && tardir=""
     rc=0
-    output=$(PATH="$STUBS${tardir:+:$tardir}:$PATH" bash "$script" "$WORK/backup.conf" </dev/null 2>&1) || rc=$?
+    output=$(PATH="$STUBS:$TARSTUB:$PATH" bash "$script" "$WORK/backup.conf" </dev/null 2>&1) || rc=$?
 }
 mqtt_last() { tail -n 1 "$STATE/mqtt" 2>/dev/null || true; }
 uploads() { find "$STATE/s3" -type f | wc -l | tr -d ' '; }
